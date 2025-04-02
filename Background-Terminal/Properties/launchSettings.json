@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Background-Terminal": {
+      "commandName": "Project",
+      "commandLineArgs": "--config C:\\Users\\fredrik\\Downloads\\config.json"
+    }
+  }
+}

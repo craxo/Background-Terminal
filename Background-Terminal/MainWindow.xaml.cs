@@ -11,12 +11,17 @@ using System.Linq;
 using System.Management;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using Background_Terminal.Extensions;
+using Background_Terminal.DTOs;
+using System.Runtime.InteropServices;
 
 namespace Background_Terminal {
     public partial class MainWindow : Window {
@@ -51,6 +56,9 @@ namespace Background_Terminal {
         private ObservableCollection<string> _terminalData = new ObservableCollection<string>();
         public ObservableCollection<NewlineTrigger> NewlineTriggers { get; set; }
 
+        // ANSI parsing
+        private AnsiEscapeCodeParser _ansiParser = new AnsiEscapeCodeParser();
+        
         // Newline State Handling
         private string _currentTrigger = null;
         private string _newlineString = Environment.NewLine;
@@ -70,13 +78,16 @@ namespace Background_Terminal {
 
         // Filter to apply to output
         private Regex _regex;
+        
+        // Flag to temporarily ignore output for clear commands
+        private bool _ignoringOutput = false;
 
         #region Constructor
         public MainWindow() {
             InitializeComponent();
 
             // Create TerminalWindow
-            _terminalWindow = new TerminalWindow(SendCommand, KillProcess, TerminalWindowUIUpdate);
+            _terminalWindow = new TerminalWindow(SendCommand, KillProcess, SendInterrupt, TerminalWindowUIUpdate);
             _terminalWindow.Show();
 
             // Apply changes in terminal data to TerminalWindow
@@ -85,12 +96,33 @@ namespace Background_Terminal {
                 {
                     Dispatcher.Invoke(() =>
                     {
-                        foreach (string newItem in target.NewItems) 
+                        if (_settings.EnableAnsiEscapeCodes)
                         {
-                            if (_regex != null) {
-                                _terminalWindow.TerminalData_TextBox.AppendText(_regex.Replace(newItem, "") + Environment.NewLine);
-                            } else {
-                                _terminalWindow.TerminalData_TextBox.AppendText(newItem + Environment.NewLine);
+                            foreach (string newItem in target.NewItems)
+                            {
+                                string processedText = newItem;
+                                if (_regex != null)
+                                {
+                                    processedText = _regex.Replace(processedText, "");
+                                }
+                                
+                                // Process through ANSI parser
+                                _ansiParser.ProcessText(processedText + Environment.NewLine);
+                                
+                                // Update document with parsed content
+                                _terminalWindow.TerminalData_TextBox.Document = _ansiParser.RenderToFlowDocument();
+                            }
+                        }
+                        else
+                        {
+                            // Original non-ANSI behavior
+                            foreach (string newItem in target.NewItems) 
+                            {
+                                if (_regex != null) {
+                                    _terminalWindow.TerminalData_TextBox.AppendText(_regex.Replace(newItem, "") + Environment.NewLine);
+                                } else {
+                                    _terminalWindow.TerminalData_TextBox.AppendText(newItem + Environment.NewLine);
+                                }
                             }
                         }
                         
@@ -137,6 +169,7 @@ namespace Background_Terminal {
             Width_TextBox.Text = _settings.Width.ToString();
             Height_TextBox.Text = _settings.Height.ToString();
             RegexFilter_TextBox.Text = _settings.RegexFilter;
+            AnsiEscapeCodes_CheckBox.IsChecked = _settings.EnableAnsiEscapeCodes;
 
             if (_settings.NewlineTriggers == null)
                 _settings.NewlineTriggers = new List<NewlineTrigger>();
@@ -168,6 +201,88 @@ namespace Background_Terminal {
             } else {
                 KillChildren();
             }
+        }
+        
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AttachConsole(uint dwProcessId);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool FreeConsole();
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetConsoleCtrlHandler(IntPtr HandlerRoutine, bool Add);
+
+        private void SendInterrupt() {
+            if (_sshMode) {
+                // Send Ctrl+C character for SSH
+                try {
+                    _sshStream?.Write(new byte[] { 0x03 });  // ASCII code for Ctrl+C
+                    _terminalData.Add("^C"); // Visual feedback
+                } catch (Exception e) {
+                    _terminalData.Add("Error sending interrupt: " + e.Message);
+                }
+            } else {
+                try {
+                    // Visual feedback
+                    _terminalData.Add("^C");
+                    
+                    // First attempt: Send Ctrl+C character directly to stdin
+                    _process.StandardInput.Write("\x03");
+                    
+                    // Second attempt: Send a "break" command for CMD processes
+                    _process.StandardInput.WriteLine();
+                    
+                    // Third attempt: More aggressive approach using console attach
+                    if (_cmdProcessId != 0) {
+                        Thread ctrlCThread = new Thread(() => {
+                            try {
+                                // Detach from our console
+                                FreeConsole();
+                                
+                                // Disable our own ctrl handler temporarily
+                                SetConsoleCtrlHandler(IntPtr.Zero, true);
+                                
+                                // Attach to target process console
+                                if (AttachConsole((uint)_cmdProcessId)) {
+                                    // Send Ctrl+C to the attached console
+                                    GenerateConsoleCtrlEvent(ConsoleCtrlEvent.CTRL_C_EVENT, 0);
+                                    
+                                    // Sleep to let the signal take effect
+                                    Thread.Sleep(100);
+                                    
+                                    // Detach from the console
+                                    FreeConsole();
+                                }
+                                
+                                // Re-enable our console handler
+                                SetConsoleCtrlHandler(IntPtr.Zero, false);
+                            }
+                            catch (Exception) {
+                                // Silently ignore errors in our fallback approach
+                            }
+                        });
+                        
+                        // Start the control thread with appropriate permissions
+                        ctrlCThread.SetApartmentState(ApartmentState.STA);
+                        ctrlCThread.Start();
+                        
+                        // Wait a reasonable time for the thread to complete
+                        ctrlCThread.Join(500);
+                    }
+                } catch (Exception e) {
+                    _terminalData.Add("Error sending interrupt: " + e.Message);
+                }
+            }
+        }
+        
+        // P/Invoke to generate console control event
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool GenerateConsoleCtrlEvent(ConsoleCtrlEvent ctrlEvent, uint processGroupId);
+        
+        private enum ConsoleCtrlEvent
+        {
+            CTRL_C_EVENT = 0,
+            CTRL_BREAK_EVENT = 1
         }
 
         private void OutputSSHUsage() {
@@ -227,6 +342,16 @@ namespace Background_Terminal {
         private async Task<int> RunTerminalProcessAsync() {
             TaskCompletionSource<int> taskCompletionSource = new TaskCompletionSource<int>();
 
+            // Reset ANSI parser when starting a new process
+            _ansiParser.Reset();
+            
+            // Ensure we have a clean UI
+            if (_settings.EnableAnsiEscapeCodes) {
+                Dispatcher.Invoke(() => {
+                    _terminalWindow.TerminalData_TextBox.Document = _ansiParser.RenderToFlowDocument();
+                });
+            }
+            
             try {
                 _process?.Kill();
             } catch (Exception e) { }
@@ -272,12 +397,81 @@ namespace Background_Terminal {
             return await taskCompletionSource.Task;
         }
 
+        // Batch update timer for ANSI rendering
+        private System.Timers.Timer _updateTimer;
+        private bool _pendingUpdate = false;
+        
         private void OutputDataReceived(object sender, DataReceivedEventArgs e) {
-            _terminalData.Add(e.Data);
+            // Don't add null data (end of stream)
+            if (e.Data == null)
+                return;
+                
+            // Skip output if we're ignoring it (for cls/clear commands)
+            if (_ignoringOutput) {
+                return;
+            }
+                
+            // Direct ANSI processing for more efficient handling of control sequences
+            if (_settings.EnableAnsiEscapeCodes) {
+                string processedText = e.Data;
+                if (_regex != null) {
+                    processedText = _regex.Replace(processedText, "");
+                }
+                
+                // Process through ANSI parser (can be done outside UI thread)
+                _ansiParser.ProcessText(processedText + Environment.NewLine);
+                
+                // Use batched updates for better performance
+                if (_updateTimer == null) {
+                    _updateTimer = new System.Timers.Timer(50); // Update every 50ms max
+                    _updateTimer.AutoReset = false;
+                    _updateTimer.Elapsed += (s, args) => {
+                        Dispatcher.Invoke(() => {
+                            // Only update if there are pending changes
+                            if (_pendingUpdate) {
+                                _terminalWindow.TerminalData_TextBox.Document = _ansiParser.RenderToFlowDocument();
+                                _terminalWindow.TerminalData_TextBox.ScrollToEnd();
+                                _pendingUpdate = false;
+                            }
+                        });
+                    };
+                }
+                
+                _pendingUpdate = true;
+                if (!_updateTimer.Enabled) {
+                    _updateTimer.Start();
+                }
+            } else {
+                _terminalData.Add(e.Data);
+            }
         }
 
         private void ErrorDataReceived(object sender, DataReceivedEventArgs e) {
-            _terminalData.Add(e.Data);
+            if (e.Data == null)
+                return;
+            
+            // Skip output if we're ignoring it (for cls/clear commands)
+            if (_ignoringOutput) {
+                return;
+            }
+                
+            if (_settings.EnableAnsiEscapeCodes) {
+                string processedText = e.Data;
+                if (_regex != null) {
+                    processedText = _regex.Replace(processedText, "");
+                }
+                
+                // Process through ANSI parser with red color for errors
+                _ansiParser.ProcessText("\x1B[31m" + processedText + "\x1B[0m" + Environment.NewLine);
+                
+                // Use the same batched update mechanism as OutputDataReceived
+                _pendingUpdate = true;
+                if (_updateTimer != null && !_updateTimer.Enabled) {
+                    _updateTimer.Start();
+                }
+            } else {
+                _terminalData.Add(e.Data);
+            }
         }
 
         private async Task<string> SendCommandSSH(string command, bool silent = false) {
@@ -344,12 +538,147 @@ namespace Background_Terminal {
             return null;
         }
 
-        private void SendCommandBGT(string command) {
-            string bgtCommand = command.Split(' ')[1];
-            string[] parameters = command.Substring(command.IndexOf(bgtCommand) + bgtCommand.Length + 1).Split(' ');
+        private ObservableCollection<string> HelpInfo = new ObservableCollection<string>
+        {
+          "BGT commands require a subcommand. Available commands:",
+          "\tbgt newline <escape_sequence> - Set custom newline character",
+          "\tbgt quit - Terminate running process",
+          "\tbgt stop - Terminate running process",
+          "\tbgt help - Show this help message"  
+        };
 
+        private void SendCommandBGT(string command) {
+            string[] parts = command.Split(' ');
+            
+            // Check if there's a subcommand
+            if (parts.Length < 2) {
+                _terminalData.AddRange(HelpInfo);
+            }
+
+            string bgtCommand = parts[1].ToLower();
+            
+            // Handle each subcommand
             if (bgtCommand.Equals("newline")) {
-                _newlineString = Regex.Unescape(parameters[0]);
+                if (parts.Length < 3) {
+                    _terminalData.Add("Usage: bgt newline <escape_sequence>");
+                    return;
+                }
+                
+                try {
+                    _newlineString = Regex.Unescape(parts[2]);
+                    _terminalData.Add("Newline sequence updated.");
+                } catch (Exception e) {
+                    _terminalData.Add("Error: " + e.Message);
+                }
+            }
+            else if (bgtCommand.Equals("help")) {
+                _terminalData.AddRange(HelpInfo);
+            }
+
+            // Special escape commands for terminating hung processes
+            else if (bgtCommand.Equals("quit") || bgtCommand.Equals("stop"))
+            {
+                _terminalData.Add("Attempting to terminate current process...");
+
+                TerminateAllChildProcesses();
+
+                _terminalData.Add("Process termination attempt complete.");
+            }
+
+            else
+            {
+                _terminalData.Add($"Unknown command: {bgtCommand}");
+                _terminalData.Add("Type 'bgt help' for a list of commands");
+            }
+        }
+
+        private void TerminateAllChildProcesses()
+        {
+            try
+            {
+                // Get all processes with the same parent process ID
+                var childProcesses = Process.GetProcesses()
+                    .Where(p =>
+                    {
+                        try
+                        {
+                            return GetParentProcessId(p.Id) == _process.Id;
+                        }
+                        catch
+                        {
+                            return false;
+                        }
+                    })
+                    .ToList();
+
+                _terminalData.Add($"Found {childProcesses.Count} child processes to terminate.");
+
+                foreach (var childProcess in childProcesses)
+                {
+                    try
+                    {
+                        if (!childProcess.HasExited)
+                        {
+                            _terminalData.Add($"Terminating process: {childProcess.ProcessName} (PID: {childProcess.Id})");
+
+                            // Try multiple termination methods
+                            childProcess.CloseMainWindow();
+
+                            if (!childProcess.WaitForExit(1000))
+                            {
+                                // Send Ctrl+C
+                                SendCtrlCToProcess(childProcess);
+
+                                if (!childProcess.WaitForExit(1000))
+                                {
+                                    // Force kill
+                                    childProcess.Kill();
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _terminalData.Add($"Error terminating process {childProcess.ProcessName}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _terminalData.Add($"Error finding child processes: {ex.Message}");
+            }
+        }
+
+        // Helper method to get parent process ID
+        private int GetParentProcessId(int processId)
+        {
+            int parentPid = 0;
+            using (var searcher = new ManagementObjectSearcher(
+                $"SELECT ParentProcessId FROM Win32_Process WHERE ProcessId = {processId}"))
+            {
+                var collection = searcher.Get();
+                foreach (ManagementObject obj in collection)
+                {
+                    parentPid = Convert.ToInt32(obj["ParentProcessId"]);
+                    break;
+                }
+            }
+            return parentPid;
+        }
+
+        // Method to send Ctrl+C to a process
+        private void SendCtrlCToProcess(Process process)
+        {
+            try
+            {
+                [DllImport("kernel32.dll")]
+                static extern bool GenerateConsoleCtrlEvent(uint dwCtrlEvent, uint dwProcessGroupId);
+
+                GenerateConsoleCtrlEvent(0, (uint)process.Id); // CTRL_C_EVENT
+            }
+            catch (Exception ex)
+            {
+                _terminalData.Add($"Error sending Ctrl+C: {ex.Message}");
             }
         }
 
@@ -385,6 +714,41 @@ namespace Background_Terminal {
                 }
             }
 
+            // Special handling for clear screen commands
+            else if (TerminalCommandRegistry.ClearCommands.Contains(command)) {
+                // Clear the terminal display immediately
+                if (_settings.EnableAnsiEscapeCodes) {
+                    // Reset the ANSI parser buffer
+                    _ansiParser.Reset();
+                    Dispatcher.Invoke(() => {
+                        _terminalWindow.TerminalData_TextBox.Document = _ansiParser.RenderToFlowDocument();
+                    });
+                } else {
+                    // Clear directly
+                    Dispatcher.Invoke(() => {
+                        _terminalWindow.TerminalData_TextBox.Document.Blocks.Clear();
+                        
+                        // Initialize with an empty paragraph to ensure proper display
+                        Paragraph paragraph = new Paragraph();
+                        _terminalWindow.TerminalData_TextBox.Document.Blocks.Add(paragraph);
+                    });
+                }
+                
+                // Set the ignore flag to skip processing the next output
+                _ignoringOutput = true;
+                
+                // Send the command to the process without adding to terminal data
+                _process.StandardInput.NewLine = _newlineString;
+                _process.StandardInput.WriteLine(command);
+                
+                // Reset the ignore flag after a short delay to allow the command to process
+                Task.Delay(300).ContinueWith(_ => {
+                    Dispatcher.Invoke(() => {
+                        _ignoringOutput = false;
+                    });
+                });
+            }
+           
             // Standard command handling
             else {
                 _terminalData.Add(command);
@@ -551,6 +915,7 @@ namespace Background_Terminal {
             _settings.Width = width;
             _settings.Height = height;
             _settings.RegexFilter = RegexFilter_TextBox.Text;
+            _settings.EnableAnsiEscapeCodes = AnsiEscapeCodes_CheckBox.IsChecked ?? true;
 
             _settings.NewlineTriggers = new List<NewlineTrigger>(NewlineTriggers);
 

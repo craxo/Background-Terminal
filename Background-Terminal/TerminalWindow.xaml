@@ -22,7 +22,14 @@
             BorderThickness="0"
             IsReadOnly="True"
             IsReadOnlyCaretVisible="True"
-            TextChanged="TerminalDataTextBox_TextChanged" />
+            TextChanged="TerminalDataTextBox_TextChanged">
+            <RichTextBox.Resources>
+                <Style TargetType="{x:Type Paragraph}">
+                    <Setter Property="Margin" Value="0"/>
+                </Style>
+            </RichTextBox.Resources>
+            <FlowDocument />
+        </RichTextBox>
         <TextBox
             x:Name="Input_TextBox"
             VerticalAlignment="Bottom"

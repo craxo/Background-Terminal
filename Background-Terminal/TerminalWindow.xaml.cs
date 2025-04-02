@@ -16,6 +16,9 @@ namespace Background_Terminal
 
         public delegate void KillProcessProc();
         private KillProcessProc KillProcess;
+        
+        public delegate void SendInterruptProc();
+        private SendInterruptProc SendInterrupt;
 
         public delegate void TerminalWindowUIUpdateProc();
         private TerminalWindowUIUpdateProc TerminalWindowUIUpdate;
@@ -35,12 +38,14 @@ namespace Background_Terminal
         public string _password = String.Empty;
 
         #region Constructors
-        public TerminalWindow(SendCommandProc sendCommand, KillProcessProc killProcess, TerminalWindowUIUpdateProc terminalWindowUIUpdate)
+        public TerminalWindow(SendCommandProc sendCommand, KillProcessProc killProcess, 
+            SendInterruptProc sendInterrupt, TerminalWindowUIUpdateProc terminalWindowUIUpdate)
         {
             InitializeComponent();
 
             SendCommand = sendCommand;
             KillProcess = killProcess;
+            SendInterrupt = sendInterrupt;
             TerminalWindowUIUpdate = terminalWindowUIUpdate;
         }
         #endregion
@@ -101,12 +106,28 @@ namespace Background_Terminal
             // Ctrl + C handling
             if (e.Key.Equals(Key.C) && _ctrlDown)
             {
-                _password = String.Empty;
-                _passwordMode = false;
-                Input_TextBox.Text = "";
+                // Reset password mode if active
+                if (_passwordMode)
+                {
+                    _password = String.Empty;
+                    _passwordMode = false;
+                    Input_TextBox.Text = "";
+                    
+                    KillProcess();
+                }
+                else
+                {
+                    // Send interrupt signal to process
+                    SendInterrupt();
+                }
 
-                KillProcess();
-
+                e.Handled = true;
+            }
+            // Alt + C for force termination (more aggressive than Ctrl+C)
+            else if (e.Key.Equals(Key.C) && Keyboard.IsKeyDown(Key.LeftAlt))
+            {
+                // Execute the special quit command
+                SendCommand("bgtquit");
                 e.Handled = true;
             }
             else if (e.Key.Equals(Key.LeftCtrl))

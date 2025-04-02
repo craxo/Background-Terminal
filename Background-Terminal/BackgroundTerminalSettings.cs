@@ -20,5 +20,9 @@ namespace Background_Terminal
         public double Height { get; set; }
         public string RegexFilter { get; set; }
         public List<NewlineTrigger> NewlineTriggers { get; set; }
+        
+        [DefaultValue(true)]
+        [JsonProperty(DefaultValueHandling = DefaultValueHandling.Populate)]
+        public bool EnableAnsiEscapeCodes { get; set; }
     }
 }

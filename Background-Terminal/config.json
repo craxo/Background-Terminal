@@ -1,1 +1,14 @@
-{"Key1":162,"Key2":66,"FontSize":12.0,"FontColor":"#FFFFFFFF","PosX":0.0,"PosY":0.0,"Width":500.0,"Height":500.0, "FontFamily": "Consolas"}
+{
+  "Key1": 162,
+  "Key2": 66,
+  "FontSize": 16.0,
+  "FontColor": "#FFFFFFFF",
+  "FontFamily": "JetBrainsMono Nerd Font",
+  "PosX": 3440.0,
+  "PosY": 20.0,
+  "Width": 1000.0,
+  "Height": 1337.0,
+  "ProcessPath": "C:\\Users\\fredrik\\Terminal\\launch-bg-terminal.bat",
+  "RegexFilter": "",
+  "NewlineTriggers": []
+}
